@@ -1,0 +1,80 @@
+# LearnCUDA
+
+A progressive, hands-on curriculum for learning CUDA from first principles to advanced optimization.
+
+## Prerequisites
+
+- Basic C/C++ knowledge (pointers, arrays, functions)
+- A CUDA-capable NVIDIA GPU
+- CUDA Toolkit installed
+- Python 3.x (for later chapters)
+
+## Environment
+
+This curriculum was developed with:
+- CUDA 12.2
+- NVIDIA RTX 4090 (Compute Capability 8.9) + GTX 1050 (CC 6.1)
+- Python 3.12 via the `.learncuda` virtual environment
+
+## Curriculum Overview
+
+| Chapter | Topic | Key Concepts |
+|---------|-------|--------------|
+| [Chapter 01](Chapter_01/README.md) | GPU Architecture & Setup | GPU vs CPU, SIMT, device queries |
+| [Chapter 02](Chapter_02/README.md) | CUDA Programming Model | Kernels, threads, blocks, grids |
+| [Chapter 03](Chapter_03/README.md) | Memory Hierarchy | Global, shared, constant, local memory |
+| [Chapter 04](Chapter_04/README.md) | Tiled Matrix Multiplication | Shared memory tiling, data reuse |
+| [Chapter 05](Chapter_05/README.md) | Parallel Reduction & Atomics | Reduction trees, warp reduction, atomics |
+| [Chapter 06](Chapter_06/README.md) | CUDA Streams & Concurrency | Streams, async transfers, pipeline overlap |
+| [Chapter 07](Chapter_07/README.md) | Profiling & Performance | CUDA events, occupancy, roofline model |
+| [Chapter 08](Chapter_08/README.md) | Unified & Pinned Memory | cudaMallocManaged, cudaMallocHost, zero-copy |
+| [Chapter 09](Chapter_09/README.md) | Warp-Level Primitives | Warp shuffle, divergence, cooperative groups |
+| [Chapter 10](Chapter_10/README.md) | CUDA Libraries | cuBLAS, Thrust, cuRAND |
+| [Chapter 11](Chapter_11/README.md) | CUDA with Python | PyTorch extensions, CuPy |
+| [Chapter 12](Chapter_12/README.md) | Multi-GPU & Advanced Optimization | Peer access, NVLink, register/occupancy tuning |
+
+## Building the Examples
+
+Each chapter contains a `Makefile`. To build a chapter:
+
+```bash
+cd Chapter_01
+make
+```
+
+To build all chapters at once from the repo root:
+
+```bash
+make all
+```
+
+## Learning Path
+
+Chapters are designed to be read in order. Each chapter:
+1. Explains concepts with diagrams and analogies
+2. Walks through progressively complex code examples
+3. Includes exercises to reinforce understanding
+4. References profiler output or benchmark results where relevant
+
+## Python Environment Setup
+
+For chapters 10-12 that use Python:
+
+```bash
+# Activate the virtual environment
+source /home/rob/PythonEnvironments/LearnCUDA/.learncuda/bin/activate
+
+# Install required packages
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install cupy-cuda12x
+pip install numpy matplotlib
+```
+
+## Useful References
+
+- [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)
+- [CUDA C++ Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)
+- [CUDA Toolkit Documentation](https://docs.nvidia.com/cuda/)
+- [NVIDIA Developer Blog](https://developer.nvidia.com/blog)
+- [CUDA by Example (book)](https://developer.nvidia.com/cuda-example)
+- [Programming Massively Parallel Processors (book)](https://www.elsevier.com/books/programming-massively-parallel-processors/kirk/978-0-12-415992-1)
