@@ -4,33 +4,103 @@
 
 A **CUDA stream** is an ordered queue of GPU operations (kernel launches, memory copies, events). Operations within a single stream execute in order. Operations in **different streams** may execute concurrently.
 
-The **default stream** (stream 0, or `cudaStreamLegacy`) is special: it synchronizes with all other streams by default. If you mix stream 0 with non-default streams, stream 0 acts as a global barrier.
+```mermaid
+graph LR
+    subgraph DEF["Default Stream (Stream 0) — implicit global barrier"]
+        D0["Op A"] --> D1["Op B"] --> D2["Op C"]
+    end
+    subgraph S1["Stream 1 — independent ordered queue"]
+        A0["H2D Copy"] --> A1["Kernel"] --> A2["D2H Copy"]
+    end
+    subgraph S2["Stream 2 — may overlap with Stream 1"]
+        B0["H2D Copy"] --> B1["Kernel"] --> B2["D2H Copy"]
+    end
+    S1 -.->|"may run concurrently"| S2
 
+    style DEF fill:#2a0d0d,color:#f1948a,stroke:#e74c3c
+    style S1  fill:#0d230d,color:#a9dfbf,stroke:#27ae60
+    style S2  fill:#0d1b2a,color:#aed6f1,stroke:#2980b9
+    style D0  fill:#922b21,color:#fff,stroke:#7b241c
+    style D1  fill:#922b21,color:#fff,stroke:#7b241c
+    style D2  fill:#922b21,color:#fff,stroke:#7b241c
+    style A0  fill:#1e8449,color:#fff,stroke:#196f3d
+    style A1  fill:#1e8449,color:#fff,stroke:#196f3d
+    style A2  fill:#1e8449,color:#fff,stroke:#196f3d
+    style B0  fill:#1f618d,color:#fff,stroke:#154360
+    style B1  fill:#1f618d,color:#fff,stroke:#154360
+    style B2  fill:#1f618d,color:#fff,stroke:#154360
 ```
-Stream 0 (default):  [Op A]──[Op B]──[Op C]           Sequential
-Stream 1:            [Copy H2D]──[Kernel]──[Copy D2H]  ↕ May overlap
-Stream 2:            [Copy H2D]──[Kernel]──[Copy D2H]  ↕ with Stream 1
-```
+
+The **default stream** (stream 0) is special: it synchronizes with all other streams by default — avoid mixing it with non-default streams.
 
 ## 6.2 Why Use Streams?
 
-Modern GPUs have separate engines for:
-- **Compute** (kernel execution)
-- **DMA Copy Engine** for H2D transfers
-- **DMA Copy Engine** for D2H transfers
+Modern GPUs have **three independent hardware engines** that can run simultaneously:
 
-These can run **simultaneously**. Without streams, you serialize everything:
+```mermaid
+graph TB
+    subgraph GPU["🎮 GPU Hardware — Three Independent Engines"]
+        H2DE["📥 H2D DMA Engine\nHost → Device copies\n(PCIe / NVLink)"]
+        CE["⚡ Compute Engine\nKernel execution\nacross all SMs"]
+        D2HE["📤 D2H DMA Engine\nDevice → Host copies\n(PCIe / NVLink)"]
+    end
+    H2DE -.->|"can overlap"| CE
+    CE   -.->|"can overlap"| D2HE
+    H2DE -.->|"can overlap"| D2HE
 
+    style GPU  fill:#1c2833,color:#85c1e9,stroke:#2e86c1
+    style H2DE fill:#7d3c98,color:#fff,stroke:#6c3483
+    style CE   fill:#1e8449,color:#fff,stroke:#196f3d
+    style D2HE fill:#1f618d,color:#fff,stroke:#154360
 ```
-Sequential (no streams):
-[H2D copy] → [Kernel] → [D2H copy] → [H2D copy] → [Kernel] → [D2H copy]
 
-Pipelined (with streams):
-Stream 0: [H2D A] → [Kernel A] ────────────── → [D2H A]
-Stream 1:         → [H2D B]   → [Kernel B] → [D2H B]
+Without streams you serialize all three engines. With streams you fill all three simultaneously.
+
+### Sequential vs. Pipelined Execution
+
+**Sequential — no streams** (one engine active at a time, total: 14 units):
+
+```mermaid
+gantt
+    title Sequential — No Streams  (engines idle most of the time)
+    dateFormat X
+    axisFormat %ss
+
+    section H2D Engine
+    Copy A to GPU   : 0, 2
+    Copy B to GPU   : 7, 9
+
+    section Compute Engine
+    Kernel A        : 2, 5
+    Kernel B        : 9, 12
+
+    section D2H Engine
+    Copy A from GPU : 5, 7
+    Copy B from GPU : 12, 14
 ```
 
-The pipelined version overlaps H2D B with Kernel A, and Kernel B with D2H A — significantly improving throughput for batch-style workloads.
+**Pipelined — 2 streams** (all three engines overlap, total: 10 units, ~29% faster):
+
+```mermaid
+gantt
+    title Pipelined — 2 Streams  (all three engines busy simultaneously)
+    dateFormat X
+    axisFormat %ss
+
+    section H2D Engine
+    [S0] Copy A to GPU   : 0, 2
+    [S1] Copy B to GPU   : 2, 4
+
+    section Compute Engine
+    [S0] Kernel A        : 2, 5
+    [S1] Kernel B        : 5, 8
+
+    section D2H Engine
+    [S0] Copy A from GPU : 7, 9
+    [S1] Copy B from GPU : 8, 10
+```
+
+> While Kernel A runs on the Compute Engine, Copy B is simultaneously loading on the H2D Engine — **hiding transfer latency behind computation**.
 
 ## 6.3 Creating and Using Streams
 
@@ -42,7 +112,7 @@ cudaStreamCreate(&stream2);
 
 // Launch async operations on a stream
 cudaMemcpyAsync(d_dst, h_src, bytes, cudaMemcpyHostToDevice, stream1);
-myKernel<<<grid, block, 0, stream1>>>(d_data);          // 3rd param: shared mem
+myKernel<<<grid, block, 0, stream1>>>(d_data);          // 4th param is stream
 cudaMemcpyAsync(h_dst, d_src, bytes, cudaMemcpyDeviceToHost, stream1);
 
 // Synchronize a single stream
@@ -56,73 +126,157 @@ cudaStreamDestroy(stream1);
 cudaStreamDestroy(stream2);
 ```
 
-**Critical**: `cudaMemcpyAsync` requires **pinned (page-locked) host memory**. Regular `malloc` memory silently falls back to synchronous behavior.
+### Pinned Memory is Required for True Async Transfers
 
-```c
-// Must use pinned memory for true async transfers
-float *h_data;
-cudaMallocHost(&h_data, bytes);   // Pinned host memory
-// ...
-cudaFreeHost(h_data);
+```diff
+  Regular malloc (pageable) — cudaMemcpyAsync silently falls back to synchronous:
+
+- float *h_data = (float*)malloc(bytes);                    // pageable memory
+- cudaMemcpyAsync(d_data, h_data, bytes, H2D, stream);      // BLOCKS the host! ✗
+- (OS may page-out memory during transfer — CUDA must pin it first, then copy)
+- (No overlap with kernel execution — defeats the purpose of streams) ✗
+
+  cudaMallocHost (pinned / page-locked) — true non-blocking async transfer:
+
++ float *h_data;
++ cudaMallocHost(&h_data, bytes);                            // pinned host memory
++ cudaMemcpyAsync(d_data, h_data, bytes, H2D, stream);      // truly non-blocking ✓
++ (Memory locked in RAM — GPU DMA engine transfers without CPU involvement)
++ (CPU returns immediately — overlap with kernel execution is possible) ✓
+
++ // Always free with the matching call:
++ cudaFreeHost(h_data);
 ```
 
 ## 6.4 Stream Synchronization Primitives
 
-### cudaStreamSynchronize
-Blocks the host until all operations in a specific stream are complete:
-```c
-cudaStreamSynchronize(stream);
-```
+```mermaid
+graph TD
+    subgraph PRIMS["Synchronization Primitives"]
+        SS["cudaStreamSynchronize(stream)\nBlocks HOST until ONE stream completes\nOther streams continue running\nUse when you only need one stream's results"]
+        DS["cudaDeviceSynchronize()\nBlocks HOST until ALL streams complete\nGlobal barrier across all GPU work\nSafe but heavyweight"]
+        EV["cudaStreamWaitEvent(stream2, event)\nGPU-side dependency between streams\nHOST is NOT blocked — CPU keeps running\nStream 2 waits for event in Stream 1"]
+    end
 
-### cudaDeviceSynchronize
-Blocks the host until **all** GPU operations across all streams are complete:
-```c
-cudaDeviceSynchronize();
+    style PRIMS fill:#1c2833,color:#85c1e9,stroke:#2e86c1
+    style SS    fill:#d35400,color:#fff,stroke:#a04000
+    style DS    fill:#c0392b,color:#fff,stroke:#922b21
+    style EV    fill:#1e8449,color:#fff,stroke:#196f3d
 ```
 
 ### CUDA Events Across Streams
-Events can create dependency relationships between streams without blocking the host:
-```c
-cudaEvent_t event;
-cudaEventCreate(&event);
 
-// Record event in stream1 when it reaches this point
-cudaEventRecord(event, stream1);
+Events create dependency relationships between streams **without blocking the host**:
 
-// Make stream2 wait for stream1's event (GPU-side wait, CPU keeps running)
-cudaStreamWaitEvent(stream2, event, 0);
+```mermaid
+sequenceDiagram
+    participant CPU  as 🖥️ Host (CPU)
+    participant S1   as Stream 1
+    participant S2   as Stream 2
 
-cudaEventDestroy(event);
+    CPU  ->> S1:  kernelA<<<grid, block, 0, stream1>>>()
+    CPU  ->> S1:  cudaEventRecord(event, stream1)
+    Note over S1: event will fire when kernelA completes
+
+    CPU  ->> S2:  cudaStreamWaitEvent(stream2, event, 0)
+    Note over CPU: Host continues immediately — not blocked ✓
+    CPU  ->> S2:  kernelB<<<grid, block, 0, stream2>>>()
+
+    activate S1
+    Note over S1: kernelA running...
+    S1  -->> S2:  event fires ✓  (GPU-side signal)
+    deactivate S1
+
+    activate S2
+    Note over S2: kernelB starts — guaranteed kernelA is done
+    deactivate S2
 ```
 
-### Non-blocking Streams
-By default, streams synchronize with the default stream. Create a truly independent stream:
+### Non-Blocking Streams
+
+By default, all streams synchronize with the default stream. Create a truly independent stream:
 ```c
 cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
 ```
 
 ## 6.5 The Double-Buffering Pipeline Pattern
 
-For processing large datasets in chunks, the double-buffer pattern gives maximum overlap:
+For processing large datasets in chunks, alternate two streams to achieve maximum overlap:
 
+```mermaid
+gantt
+    title Double-Buffer Pipeline — 4 chunks, 2 streams alternating
+    dateFormat X
+    axisFormat %ss
+
+    section H2D Engine
+    [S0] Chunk 0  : 0,  2
+    [S1] Chunk 1  : 2,  4
+    [S0] Chunk 2  : 4,  6
+    [S1] Chunk 3  : 6,  8
+
+    section Compute Engine
+    [S0] Chunk 0  : 2,  5
+    [S1] Chunk 1  : 5,  8
+    [S0] Chunk 2  : 8,  11
+    [S1] Chunk 3  : 11, 14
+
+    section D2H Engine
+    [S0] Chunk 0  : 5,  7
+    [S1] Chunk 1  : 8,  10
+    [S0] Chunk 2  : 11, 13
+    [S1] Chunk 3  : 14, 16
 ```
-Stream A: [H2D chunk 0] [Kernel chunk 0]             [D2H chunk 0]
-Stream B:              [H2D chunk 1]  [Kernel chunk 1]             [D2H chunk 1]
-Stream A:                                             [H2D chunk 2] ...
+
+Each chunk alternates between Stream 0 and Stream 1. While chunk N is being **computed** on Stream 0, chunk N+1's data is being **loaded** on Stream 1 — **transfer latency fully hidden behind computation** after the first chunk.
+
+```mermaid
+flowchart LR
+    C0["Chunk 0\nS0: H2D→Kernel→D2H"]
+    C1["Chunk 1\nS1: H2D→Kernel→D2H"]
+    C2["Chunk 2\nS0: H2D→Kernel→D2H"]
+    C3["Chunk 3\nS1: H2D→Kernel→D2H"]
+
+    C0 -->|"S1 H2D overlaps\nS0 kernel"| C1
+    C1 -->|"S0 H2D overlaps\nS1 kernel"| C2
+    C2 -->|"S1 H2D overlaps\nS0 kernel"| C3
+
+    style C0 fill:#1e8449,color:#fff,stroke:#196f3d
+    style C1 fill:#1f618d,color:#fff,stroke:#154360
+    style C2 fill:#1e8449,color:#fff,stroke:#196f3d
+    style C3 fill:#1f618d,color:#fff,stroke:#154360
 ```
-
-Each chunk alternates between two streams (A and B). While chunk N is being processed by the kernel on stream A, chunk N+1's data is being copied to the GPU on stream B.
-
-This **hides transfer latency** behind computation.
 
 ## 6.6 Concurrent Kernel Execution
 
 On GPUs with `concurrentKernels = 1` (almost all modern GPUs), multiple small kernels in different streams can run simultaneously if the GPU has idle SMs:
 
-```c
-// These two kernels may execute simultaneously on different SMs
-kernelA<<<small_grid, block, 0, stream1>>>(data_a);
-kernelB<<<small_grid, block, 0, stream2>>>(data_b);
+```mermaid
+graph LR
+    subgraph SMALL["Small kernels — each uses ~30% of SMs"]
+        KA["kernelA\n<<<32, 256, 0, stream1>>>\n~30% SM utilization"]
+        KB["kernelB\n<<<32, 256, 0, stream2>>>\n~30% SM utilization"]
+        KC["kernelC\n<<<32, 256, 0, stream3>>>\n~30% SM utilization"]
+    end
+    subgraph GPU128["RTX 4090 — 128 SMs"]
+        SM0["SMs 0–38\nrunning kernelA"]
+        SM1["SMs 39–76\nrunning kernelB"]
+        SM2["SMs 77–114\nrunning kernelC"]
+        SM3["SMs 115–127\nidle"]
+    end
+    KA --> SM0
+    KB --> SM1
+    KC --> SM2
+
+    style SMALL fill:#1c2833,color:#85c1e9,stroke:#2e86c1
+    style GPU128 fill:#0d230d,color:#a9dfbf,stroke:#27ae60
+    style KA fill:#e74c3c,color:#fff,stroke:#c0392b
+    style KB fill:#d35400,color:#fff,stroke:#a04000
+    style KC fill:#7d3c98,color:#fff,stroke:#6c3483
+    style SM0 fill:#c0392b,color:#fff,stroke:#922b21
+    style SM1 fill:#a04000,color:#fff,stroke:#d35400
+    style SM2 fill:#6c3483,color:#fff,stroke:#7d3c98
+    style SM3 fill:#2c3e50,color:#7f8c8d,stroke:#566573
 ```
 
 This is useful when a single kernel doesn't saturate all SMs.
@@ -137,9 +291,9 @@ This is useful when a single kernel doesn't saturate all SMs.
 
 ## 6.8 Key Takeaways
 
-- Streams are ordered queues; different streams can overlap.
-- `cudaMemcpyAsync` **requires pinned host memory** (`cudaMallocHost`).
-- The kernel launch 3rd parameter is dynamic shared memory, not stream — stream is the **4th**.
+- Streams are ordered queues; different streams can overlap on independent GPU engines.
+- `cudaMemcpyAsync` **requires pinned host memory** (`cudaMallocHost`) — pageable memory silently serializes.
+- The kernel launch **4th** parameter is the stream (3rd is dynamic shared memory size).
 - Use `cudaStreamWaitEvent` for GPU-side stream dependencies without blocking the CPU.
-- The double-buffer pipeline pattern is the standard for maximizing throughput on streaming data.
-- Don't use the default stream with non-default streams unless you want implicit synchronization.
+- The **double-buffer pipeline** alternates two streams to keep all three GPU engines busy.
+- Don't mix default stream (stream 0) with non-default streams — it acts as a global barrier.
